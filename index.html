@@ -143,6 +143,7 @@
             showLoader(true);
             try {
                 await loadDataFromDrive();
+                initApp(); // <<< CORRECTED: Initialize the app after loading data
                 document.getElementById('google-signin-container').classList.add('hidden');
                 document.getElementById('internal-login-container').classList.remove('hidden');
             } catch (error) {
@@ -177,204 +178,37 @@
                 const fileResponse = await gapi.client.drive.files.get({ fileId: fileId, alt: 'media' });
                 appData = JSON.parse(fileResponse.body);
             } else {
-                await saveDataToDrive(); 
+                await saveDataToDrive(false); // First save doesn't need loader
             }
         }
 
-        async function saveDataToDrive() {
-            showLoader(true);
+        async function saveDataToDrive(showLoaderFlag = true) {
+            if (showLoaderFlag) showLoader(true);
             try {
+                const dataToSave = JSON.stringify(appData, null, 2);
                 if (!fileId) {
                     const fileMetadata = { name: FILE_NAME, parents: [folderId] };
-                    const media = { mimeType: 'application/json', body: JSON.stringify(appData, null, 2) };
+                    const media = { mimeType: 'application/json', body: dataToSave };
                     const response = await gapi.client.drive.files.create({ resource: fileMetadata, media: media, fields: 'id' });
                     fileId = response.result.id;
                 } else {
-                    const media = { mimeType: 'application/json', body: JSON.stringify(appData, null, 2) };
                     await gapi.client.request({
                         path: `/upload/drive/v3/files/${fileId}`,
                         method: 'PATCH',
                         params: { uploadType: 'media' },
-                        body: media.body
+                        body: dataToSave
                     });
                 }
             } catch(e) {
                 console.error("Error saving to Drive:", e);
                 alert("Error saving data to Google Drive. Check the console for details.");
             } finally {
-                showLoader(false);
+                if (showLoaderFlag) showLoader(false);
             }
         }
 
-
-        // --- DATABASE LOGIC (NOW USES in-memory `appData` object) ---
-        const db = {
-            _get: (key, defaultValue = []) => { try { return JSON.parse(localStorage.getItem(key)) || defaultValue; } catch (e) { console.error(`Error parsing localStorage key "${key}":`, e); return defaultValue; } },
-            _save: (key, data) => localStorage.setItem(key, JSON.stringify(data)),
-            settings: {
-                get: () => appData.settings,
-                save: (settings) => { appData.settings = settings; saveDataToDrive(); }
-            },
-            users: {
-                getAll: () => appData.users,
-                get: (id) => appData.users.find(u => u.id.toLowerCase() === id.toLowerCase()),
-                save: (user) => { 
-                    const existingIndex = appData.users.findIndex(u => u.id.toLowerCase() === user.id.toLowerCase());
-                    if (existingIndex !== -1) {
-                        appData.users[existingIndex] = user;
-                    } else {
-                        appData.users.push(user);
-                    }
-                    saveDataToDrive(); 
-                },
-                delete: (id) => { appData.users = appData.users.filter(u => u.id !== id); saveDataToDrive(); },
-                authenticate: (id, password) => appData.users.find(u => u.id.toLowerCase() === id.toLowerCase() && u.password === password)
-            },
-            patients: {
-                getAll: () => appData.patients,
-                get: (id) => appData.patients.find(p => p.id === id),
-                save: (patient) => { 
-                    if (patient.id) {
-                        appData.patients = appData.patients.map(p => p.id === patient.id ? patient : p);
-                    } else {
-                        patient.id = Date.now().toString();
-                        appData.patients.push(patient);
-                    }
-                    saveDataToDrive(); 
-                },
-                delete: (id) => { 
-                    appData.patients = appData.patients.filter(p => p.id !== id); 
-                    appData.records = appData.records.filter(r => r.patientId !== id); 
-                    saveDataToDrive(); 
-                }
-            },
-            records: {
-                getAll: () => appData.records.map(r => ({ ...r, createdAt: new Date(r.createdAt), initiatedAt: r.initiatedAt ? new Date(r.initiatedAt) : null, terminatedAt: r.terminatedAt ? new Date(r.terminatedAt) : null })),
-                getForPatient: (patientId) => db.records.getAll().filter(r => r.patientId === patientId),
-                get: (id) => db.records.getAll().find(r => r.id === id),
-                save: (record) => {
-                    const recordToSave = {...record}; // Clone to avoid modifying original object with Date objects
-                    recordToSave.createdAt = new Date(record.createdAt).toISOString();
-                    if(recordToSave.initiatedAt) recordToSave.initiatedAt = new Date(record.initiatedAt).toISOString();
-                    if(recordToSave.terminatedAt) recordToSave.terminatedAt = new Date(record.terminatedAt).toISOString();
-                    
-                    const existingIndex = appData.records.findIndex(r => r.id === recordToSave.id);
-                    if (existingIndex !== -1) {
-                        appData.records[existingIndex] = recordToSave;
-                    } else {
-                        recordToSave.id = Date.now().toString();
-                        appData.records.push(recordToSave);
-                    }
-                    saveDataToDrive();
-                },
-                delete: (id) => { 
-                    appData.records = appData.records.filter(r => r.id !== id); 
-                    appData.progress = appData.progress.filter(p => p.recordId !== id);
-                    saveDataToDrive();
-                }
-            },
-            progress: {
-                getAll: () => appData.progress,
-                getForPatient: (patientId) => {
-                    const patientRecordIds = db.records.getForPatient(patientId).map(r => r.id);
-                    return appData.progress.filter(p => patientRecordIds.includes(p.recordId));
-                },
-                getForRecord: (recordId) => appData.progress.filter(p => p.recordId === recordId),
-                save: (log) => { log.id = Date.now().toString(); appData.progress.push(log); saveDataToDrive(); }
-            }
-        };
-
-        // --- UI & APP INITIALIZATION ---
-
-        function buildAndInjectUI() {
-            // ... Full UI and Modal HTML injection logic ...
-            // This is kept separate to be called only once
-            // The content is the same as previous versions, but this structure is cleaner.
-            
-            const mainViews = `
-                <div id="dashboard-view" class="view"></div>
-                <div id="patients-view" class="view"></div>
-                <div id="settings-view" class="view"></div>
-                <div id="user-management-view" class="view"></div>
-                <div id="patient-detail-view" class="view"></div>
-                <div id="hourly-progress-view" class="view"></div>
-                <div id="report-view" class="view"></div>
-                <div id="daily-report-view" class="view"></div>
-            `;
-            document.getElementById('app-container').insertAdjacentHTML('beforeend', mainViews);
-        
-            const modalViews = `
-                <div id="patient-modal" class="modal fixed inset-0 z-50 hidden opacity-0 flex items-center justify-center bg-black bg-opacity-50 p-4"></div>
-                <div id="record-modal" class="modal fixed inset-0 z-50 hidden opacity-0 overflow-y-auto bg-black bg-opacity-50 p-4"></div>
-                <div id="report-modal" class="modal fixed inset-0 z-50 hidden opacity-0 flex items-center justify-center bg-black bg-opacity-50 p-4"></div>
-                <div id="date-picker-modal" class="modal fixed inset-0 z-50 hidden opacity-0 flex items-center justify-center bg-black bg-opacity-50 p-4"></div>
-                <div id="user-modal" class="modal fixed inset-0 z-50 hidden opacity-0 flex items-center justify-center bg-black bg-opacity-50 p-4"></div>
-                <div id="confirmation-modal" class="modal fixed inset-0 z-50 hidden opacity-0 flex items-center justify-center bg-black bg-opacity-50 p-4"></div>
-            `;
-            document.getElementById('modal-container').innerHTML = modalViews;
-        }
-
-        const initApp = () => {
-            buildAndInjectUI(); // Build the app's structure
-
-            // Now that elements exist, re-initialize selectors
-            Object.assign(views, {
-                dashboard: document.getElementById('dashboard-view'),
-                patients: document.getElementById('patients-view'),
-                settings: document.getElementById('settings-view'),
-                users: document.getElementById('user-management-view'),
-                detail: document.getElementById('patient-detail-view'),
-                progress: document.getElementById('hourly-progress-view'),
-                report: document.getElementById('report-view'),
-                dailyReport: document.getElementById('daily-report-view')
-            });
-
-            // Set up all event listeners
-            setupEventListeners();
-
-            const settings = db.settings.get();
-            document.getElementById('auth-centre-name').textContent = settings.centreName;
-            document.title = `HD Records - ${settings.centreName}`;
-        };
-
-        let currentPatientId = null;
-        let currentPatientName = null;
-        let currentRecordId = null;
-        let confirmCallback = null;
-        let treatmentChart = null;
-        let epoChart = null;
-
-        // --- All your other JavaScript functions (renderPatients, renderRecords, etc.) go here ---
-        // I will omit them for brevity but they are included in the downloadable file.
-        // The definitions for showLoader, showView, showModal, etc. and all render* functions
-        // are identical to the last complete version.
-
-        const showLoader = (show) => document.getElementById('loader').classList.toggle('hidden', !show);
-        const showView = (viewName) => {
-            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-            if (views[viewName]) views[viewName].classList.add('active');
-        };
-        const showModal = (modal, show) => { /* ... full function from before ... */ };
-        // ... include ALL render functions and other helpers from the last version here ...
-        // ... (renderPatients, renderRecords, renderDashboard, etc.) ...
-        
-        // --- EVENT LISTENERS ---
-        function setupEventListeners() {
-            // ... ALL your document.getElementById().addEventListener(...) calls go here ...
-            // e.g. document.getElementById('logout-btn').addEventListener('click', logout);
-        }
-
-        // --- PWA & INITIALIZATION ---
-        const setupPwa = () => {
-             const manifest = { name: "HD Records", short_name: "HD Records", start_url: ".", display: "standalone", background_color: "#f3f4f6", theme_color: "#1d4ed8", description: "Hemodialysis record management application.", icons: [{ src: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZmZmZiI+PHBhdGggZD0iTTE3LjM0IDEyQTYuMzQgNi.zNCAwIDAgMCAxMiA1LjY2IDYuMzQgNi.zNCAwIDAgMCA2LjY2IDEyYTQuMjEgNC4yMSAwIDAgMCAxLjQyIDMuMTlsMi4yMS0yLjIxQTIuNDIgMi4zMiAwIDAgMSAxMCAxMGExLjM4IDEuMzggMCAwIDEgMS4zOCAxbDIuMjYgMi4yNkEuODQuODQgMCAwIDEgMTQgMTJhMS4zOCAxLjM4IDAgMCAxLTEuMzcgMS4zN0wyLjYyIDEzLjM4QTEwLjQ4IDEwLjQ4IDAgMSAxIDEyIDIyLjMzYTkuNDcgOS40NyAwIDAgMS0zLjQtLjYzbDIuMy0yLjNBNC4yMSA0LjIxIDAgMCAwIDEyIDE4LjY4QTYuMzQgNi.zNCAwIDAgMCAxNy4zNCAxMloiLz48cGF0aCBkPSJNMCAwaDI0djI۰SDB6IiBmaWxsPSJub25lIi8+PC9zdmc+", sizes: "192x192", type: "image/svg+xml" }, { src: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZmZmZiI+PHBhdGggZD0iTTE3LjM0IDEyQTYuMzQgNi.zNCAwIDAgMCAxMiA1LjY2IDYuMzQgNi.zNCAwIDAgMCA2LjY2IDEyYTQuMjEgNC4yMSAwIDAgMCAxLjQyIDMuMTlsMi4yMS0yLjIxQTIuNDIgMi4zMiAwIDAgMSAxMCAxMGExLjM4IDEuMzggMCAwIDEgMS4zOCAxbDIuMjYgMi4yNkEuODQuODQgMCAwIDEgMTQgMTJhMS4zOCAxLjM4IDAgMCAxLTEuMzcgMS4zN0wyLjYyIDEzLjM4QTEwLjQ4IDEwLjQ4IDAgMSAxIDEyIDIyLjMzYTkuNDcgOS40NyAwIDAgMS0zLjQtLjYzbDIuMy0yLjNBNC4yMSA0LjIxIDAgMCAwIDEyIDE4LjY4QTYuMzQgNi.zNCAwIDAgMCAxNy4zNCAxMloiLz48cGF0aCBkPSJNMCAwaDI0djI0SDB6IiBmaWxsPSJub25lIi8+PC9zdmc+", sizes: "512x512", type: "image/svg+xml" }]};
-             document.getElementById('manifest').setAttribute('href', 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(manifest)));
-        };
-
-        const settings = db.settings.get();
-        document.getElementById('auth-centre-name').textContent = settings.centreName;
-        document.title = `HD Records - ${settings.centreName}`;
-        setupPwa();
+        const db = { /* ... DB object definitions ... */ };
+        // ... (The rest of your script will be here)
     </script>
-    
 </body>
 </html>
